@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +65,8 @@ class Config:
     lm_studio_timeout_seconds: int
     lm_studio_system_prompt: str
     bot_log_path: Path
+    bot_log_max_bytes: int
+    bot_log_backup_count: int
     bot_max_queue_size: int
     bot_user_cooldown_seconds: int
 
@@ -87,6 +90,8 @@ def load_config() -> Config:
         lm_studio_timeout_seconds=_env_int("LM_STUDIO_TIMEOUT_SECONDS", 180),
         lm_studio_system_prompt=os.getenv("LM_STUDIO_SYSTEM_PROMPT") or DEFAULT_SYSTEM_PROMPT,
         bot_log_path=Path(os.getenv("BOT_LOG_PATH") or DEFAULT_LOG_PATH),
+        bot_log_max_bytes=_env_int("BOT_LOG_MAX_BYTES", 1_000_000),
+        bot_log_backup_count=_env_int("BOT_LOG_BACKUP_COUNT", 3),
         bot_max_queue_size=_env_int("BOT_MAX_QUEUE_SIZE", 3),
         bot_user_cooldown_seconds=_env_int("BOT_USER_COOLDOWN_SECONDS", 2),
     )
@@ -154,16 +159,24 @@ def configure_logging(config: Config) -> None:
     formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
     stream_handler = logging.StreamHandler()
     stream_handler.setFormatter(formatter)
-    file_handler = logging.FileHandler(config.bot_log_path, encoding="utf-8")
+    file_handler = RotatingFileHandler(
+        config.bot_log_path,
+        maxBytes=config.bot_log_max_bytes,
+        backupCount=config.bot_log_backup_count,
+        encoding="utf-8",
+    )
     file_handler.setFormatter(formatter)
     logging.basicConfig(level=logging.INFO, handlers=[stream_handler, file_handler], force=True)
 
 
 def _safe_identifier(value: str) -> str:
-    identifier = value.strip().split("/")[-1].lower()
-    identifier = re.sub(r"[^a-z0-9_.:-]+", "-", identifier).strip("-")
+    identifier = value.strip().split("/")[-1]
     if not identifier:
         raise ValueError("Model identifier cannot be empty.")
+    if not re.fullmatch(r"[A-Za-z0-9_.:@-]+", identifier):
+        raise ValueError(
+            "Model identifier can only contain letters, numbers, dot, underscore, colon, at-sign, and dash."
+        )
     return identifier
 
 
@@ -317,7 +330,7 @@ def ask_lm_studio_with_reload(prompt: str, config: Config, state: dict[str, str]
 
     model_spec = state.get("active_model_spec") or model
     logging.info("event=auto_reload model=%s spec=%s", model, model_spec)
-    _check_load_guard(config, model, model)
+    _check_memory_guard(config)
     _load_model(config, model_spec, model)
     return ask_lm_studio(prompt, config, model)
 
@@ -402,11 +415,15 @@ def handle_model_command(command: str, config: Config, state: dict[str, str]) ->
         if len(parts) < 2:
             return "Usage: `!lm use <loaded-model-identifier>`"
         identifier = _safe_identifier(parts[1])
+        if not _is_model_loaded(config, identifier):
+            return (
+                f"Use command failed. `{identifier}` is not currently loaded in LM Studio.\n"
+                "Run `!lm loaded` to see valid identifiers, or `!lm load <model> as <identifier>`."
+            )
         state["active_model"] = identifier
         state["active_model_spec"] = identifier
-        if _is_model_loaded(config, identifier):
-            state["last_good_model"] = identifier
-            state["last_good_model_spec"] = identifier
+        state["last_good_model"] = identifier
+        state["last_good_model_spec"] = identifier
         _save_state(state)
         _sync_env_active_model(identifier)
         return f"Use command completed. Using `{identifier}` for new replies."
@@ -425,20 +442,27 @@ def handle_model_command(command: str, config: Config, state: dict[str, str]) ->
         unload_note = ""
         try:
             loaded_before = _loaded_model_identifiers(config)
-            unloaded: list[str] = []
-            for loaded_identifier in loaded_before:
-                if loaded_identifier == identifier:
-                    continue
+            blockers = [
+                loaded_identifier
+                for loaded_identifier in loaded_before
+                if loaded_identifier not in {previous_identifier, identifier}
+            ]
+            if blockers:
+                raise RuntimeError(
+                    "Refusing to load while these non-bot models are already loaded: "
+                    + ", ".join(blockers)
+                    + ". Use `!lm loaded` to inspect LM Studio, then unload them manually if needed."
+                )
+
+            if previous_identifier != identifier and previous_identifier in loaded_before:
                 try:
-                    _run_lms(config, ["unload", loaded_identifier], timeout=120)
-                    unloaded.append(loaded_identifier)
+                    _run_lms(config, ["unload", previous_identifier], timeout=120)
+                    unload_note = f"Unloaded previous bot model `{previous_identifier}`.\n"
                 except Exception as exc:
-                    unload_note += (
-                        f"Tried to unload `{loaded_identifier}`, but LM Studio reported: "
+                    unload_note = (
+                        f"Tried to unload previous bot model `{previous_identifier}`, but LM Studio reported: "
                         f"`{str(exc).strip() or exc.__class__.__name__}`\n"
                     )
-            if unloaded:
-                unload_note = f"Unloaded: {', '.join(f'`{item}`' for item in unloaded)}.\n" + unload_note
 
             if _is_model_loaded(config, identifier):
                 output = f"Model `{identifier}` was already loaded."
@@ -586,6 +610,7 @@ class LMStudioDiscordClient(discord.Client):
         outcome = "success"
         error_name = ""
         model = self.state["active_model"]
+        reply = "Unexpected bot error before a reply was generated."
 
         try:
             async with self.request_semaphore:
@@ -638,6 +663,11 @@ class LMStudioDiscordClient(discord.Client):
                         error_name = exc.__class__.__name__
                         logging.exception("Unexpected bot error.")
                         reply = _format_error("Unexpected bot error.", exc)
+        except Exception as exc:
+            outcome = "failure"
+            error_name = exc.__class__.__name__
+            logging.exception("Bot request processing failed.")
+            reply = _format_error("Bot request processing failed.", exc)
         finally:
             self.pending_requests -= 1
             duration_ms = int((time.monotonic() - start_time) * 1000)
@@ -652,8 +682,11 @@ class LMStudioDiscordClient(discord.Client):
                 error_name or "-",
             )
 
-        for chunk in _discord_chunks(reply):
-            await message.reply(chunk, mention_author=False)
+        try:
+            for chunk in _discord_chunks(reply):
+                await message.reply(chunk, mention_author=False)
+        except discord.DiscordException:
+            logging.exception("Discord reply failed.")
 
 
 def main() -> None:
