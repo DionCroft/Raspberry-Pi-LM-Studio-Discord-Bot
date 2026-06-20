@@ -4,4 +4,5 @@ __pycache__/
 *.pyc
 bot.log
 bot.lock
+logs/
 state.json

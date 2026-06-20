@@ -1,0 +1,15 @@
+[Unit]
+Description=LM Studio Discord Bot
+Requires=lm-studio-qwen35-08b.service
+After=network-online.target lm-studio-qwen35-08b.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/cadmus/Projects/lm-studio-discord-bot
+ExecStart=/home/cadmus/Projects/lm-studio-discord-bot/.venv/bin/python /home/cadmus/Projects/lm-studio-discord-bot/bot.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,14 @@
+[Unit]
+Description=Ensure LM Studio qwen3.5-0.8b Model
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/cadmus/Projects/lm-studio-discord-bot
+ExecStart=/home/cadmus/Projects/lm-studio-discord-bot/scripts/ensure_lm_studio_model.sh
+TimeoutStartSec=15min
+
+[Install]
+WantedBy=default.target

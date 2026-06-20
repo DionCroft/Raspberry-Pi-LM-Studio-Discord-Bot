@@ -368,21 +368,23 @@ def _check_memory_guard(config: Config) -> None:
 
 
 def _load_model(config: Config, model_spec: str, identifier: str) -> str:
+    args = [
+        "load",
+        model_spec,
+        "--context-length",
+        str(config.lms_default_context_length),
+        "--parallel",
+        "1",
+        "--identifier",
+        identifier,
+        "-y",
+    ]
+    if config.lms_default_ttl_seconds > 0:
+        args.extend(["--ttl", str(config.lms_default_ttl_seconds)])
+
     return _run_lms(
         config,
-        [
-            "load",
-            model_spec,
-            "--context-length",
-            str(config.lms_default_context_length),
-            "--parallel",
-            "1",
-            "--identifier",
-            identifier,
-            "--ttl",
-            str(config.lms_default_ttl_seconds),
-            "-y",
-        ],
+        args,
         timeout=420,
     )
 

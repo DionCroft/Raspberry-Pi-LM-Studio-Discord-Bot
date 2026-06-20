@@ -19,6 +19,7 @@ DISCORD_CHANNEL_ID=your-channel-id
 DISCORD_LM_PREFIX=!lm
 LM_STUDIO_BASE_URL=http://127.0.0.1:1234/v1
 LM_STUDIO_MODEL=qwen3.5-0.8b
+LMS_DEFAULT_TTL_SECONDS=0
 ```
 
 In the Discord Developer Portal, enable the bot's **Message Content Intent**.
@@ -31,12 +32,38 @@ Make sure LM Studio's local server is running and your model is loaded, then sta
 
 If the bot is installed as a user service, do not also run `./run.sh` in another terminal. The service is the normal way to keep the bot online.
 
+## Boot Setup
+
+The Pi uses two user services:
+
+```bash
+systemctl --user enable lm-studio-qwen35-08b.service
+systemctl --user enable lm-studio-discord-bot.service
+```
+
+`lm-studio-qwen35-08b.service` starts LM Studio's local server, unloads every model except `qwen3.5-0.8b`, and loads `qwen3.5-0.8b` if needed. The Discord bot service depends on it, so the model is ready before the bot starts after a reboot.
+
+If you change the model in `.env`, restart both services:
+
+```bash
+systemctl --user restart lm-studio-qwen35-08b.service
+systemctl --user restart lm-studio-discord-bot.service
+```
+
+Service templates live in `systemd/`; install them to `~/.config/systemd/user/`.
+
 ## Service Commands
 
 Check whether the bot is running:
 
 ```bash
 systemctl --user status lm-studio-discord-bot.service
+```
+
+Check whether LM Studio/model boot prep completed:
+
+```bash
+systemctl --user status lm-studio-qwen35-08b.service
 ```
 
 Restart the bot after editing `.env` or `bot.py`:
@@ -56,6 +83,12 @@ Follow the bot log:
 
 ```bash
 tail -f bot.log
+```
+
+Follow the LM Studio model loader log:
+
+```bash
+tail -f logs/lm-studio-model.log
 ```
 
 For foreground testing in a terminal, stop the service first, run the script, then press `Ctrl+C` when finished and start the service again:
