@@ -36,6 +36,7 @@ Use it in Discord with `!lm hello`, by mentioning the bot, or by sending it a DM
 The bot can manage LM Studio models through the local `lms` CLI.
 
 ```text
+!lm health
 !lm status
 !lm models
 !lm loaded
@@ -44,3 +45,12 @@ The bot can manage LM Studio models through the local `lms` CLI.
 ```
 
 `!lm models` lists downloaded LM Studio models. `!lm loaded` shows currently loaded model instances. `!lm load ...` unloads the previously active model when switching identifiers, loads the new model with one parallel slot and the context length from `LMS_DEFAULT_CONTEXT_LENGTH`, then makes the bot use that identifier for future replies.
+
+## Self-Healing
+
+- `!lm health` checks Discord readiness, LM Studio's API, the active model, loaded models, and available RAM.
+- If chat fails because the active model is not loaded, the bot tries to load it once and then retries the chat.
+- The bot processes one LM/model request at a time and keeps only a small queue so the Pi is not flooded.
+- Loading a new model switches back to the previous model if the new load fails.
+- Loading is refused when another non-active model is already loaded or available RAM is below `LMS_MIN_FREE_MEMORY_MB`.
+- `bot.log` records command name, model, duration, and success/failure without logging Discord message text or tokens.
