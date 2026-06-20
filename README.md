@@ -18,7 +18,7 @@ DISCORD_BOT_TOKEN=your-bot-token
 DISCORD_CHANNEL_ID=your-channel-id
 DISCORD_LM_PREFIX=!lm
 LM_STUDIO_BASE_URL=http://127.0.0.1:1234/v1
-LM_STUDIO_MODEL=qwen3-1.7b
+LM_STUDIO_MODEL=qwen3.5-0.8b
 ```
 
 In the Discord Developer Portal, enable the bot's **Message Content Intent**.
@@ -76,23 +76,36 @@ The bot can manage LM Studio models through the local `lms` CLI.
 
 ```text
 !lm health
+!lm clean
 !lm status
 !lm models
 !lm loaded
-!lm use qwen3-1.7b
-!lm load qwen/qwen3-1.7b as qwen3-1.7b
+!lm use qwen3.5-0.8b
+!lm load qwen3.5-0.8b
 ```
 
-`!lm models` lists downloaded LM Studio models. `!lm loaded` shows currently loaded model instances. `!lm load ...` unloads the previously active model when switching identifiers, loads the new model with one parallel slot and the context length from `LMS_DEFAULT_CONTEXT_LENGTH`, then makes the bot use that identifier for future replies.
+`!lm models` lists downloaded LM Studio models. `!lm loaded` shows currently loaded model instances. `!lm clean` unloads everything except the active bot model, loading the active model first if needed. `!lm load ...` unloads every other loaded model, loads the new model with one parallel slot and the context length from `LMS_DEFAULT_CONTEXT_LENGTH`, then makes the bot use that identifier for future replies.
 
-Model identifiers are matched exactly against LM Studio's loaded identifiers, including names such as `qwen3-1.7b@q4_k_m`. `!lm use ...` only succeeds for a currently loaded identifier.
+Model identifiers are matched exactly against LM Studio's loaded identifiers, including names such as `qwen3.5-0.8b` or `qwen3.5-0.8b@q4_k_m`. `!lm use ...` only succeeds for a currently loaded identifier.
+
+## Timeout Notes
+
+If Discord says LM Studio timed out, the most common cause on the Pi is too many chat models loaded at once or a model that is too large for the available RAM. Run:
+
+```text
+!lm health
+!lm loaded
+```
+
+Keep only one model loaded for the bot. The smaller `qwen3.5-0.8b` model should be the fast option; larger 4B+ models can work, but they may take several minutes or time out under load.
 
 ## Self-Healing
 
 - `!lm health` checks Discord readiness, LM Studio's API, the active model, loaded models, and available RAM.
+- `!lm clean` enforces single-model mode by unloading everything except the active model.
 - If chat fails because the active model is not loaded, the bot tries to load it once and then retries the chat.
 - The bot processes one LM/model request at a time and keeps only a small queue so the Pi is not flooded.
-- Loading a new model unloads only the bot's previous active model. It refuses to eject unrelated loaded LM Studio models.
+- Chat, `!lm use`, and `!lm load` enforce single-model mode before using LM Studio.
 - Loading a new model switches back to the previous bot model if the new load fails.
-- Loading is refused when another non-bot model is already loaded or available RAM is below `LMS_MIN_FREE_MEMORY_MB`.
+- Loading is refused when available RAM is below `LMS_MIN_FREE_MEMORY_MB`.
 - `bot.log` records command name, model, duration, and success/failure without logging Discord message text or tokens. It rotates according to `BOT_LOG_MAX_BYTES` and `BOT_LOG_BACKUP_COUNT`.
