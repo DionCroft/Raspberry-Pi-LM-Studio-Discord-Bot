@@ -21,6 +21,7 @@ import requests
 
 DISCORD_MESSAGE_LIMIT = 1900
 PROJECT_DIR = Path(__file__).resolve().parent
+ENV_PATH = PROJECT_DIR / ".env"
 STATE_PATH = PROJECT_DIR / "state.json"
 LOCK_PATH = PROJECT_DIR / "bot.lock"
 DEFAULT_LOG_PATH = PROJECT_DIR / "bot.log"
@@ -126,6 +127,26 @@ def _load_state(default_model: str) -> dict[str, str]:
 
 def _save_state(state: dict[str, str]) -> None:
     STATE_PATH.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+
+
+def _set_dotenv_value(path: Path, key: str, value: str) -> None:
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    pattern = re.compile(rf"^\s*{re.escape(key)}\s*=")
+    replacement = f"{key}={value}"
+
+    for index, line in enumerate(lines):
+        if pattern.match(line) and not line.lstrip().startswith("#"):
+            lines[index] = replacement
+            break
+    else:
+        lines.append(replacement)
+
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    os.environ[key] = value
+
+
+def _sync_env_active_model(identifier: str) -> None:
+    _set_dotenv_value(ENV_PATH, "LM_STUDIO_MODEL", identifier)
 
 
 def configure_logging(config: Config) -> None:
@@ -249,6 +270,7 @@ def _mark_active_model(state: dict[str, str], identifier: str, model_spec: str) 
     state["last_good_model"] = identifier
     state["last_good_model_spec"] = model_spec
     _save_state(state)
+    _sync_env_active_model(identifier)
 
 
 def _looks_like_model_not_loaded(error: requests.HTTPError) -> bool:
@@ -386,6 +408,7 @@ def handle_model_command(command: str, config: Config, state: dict[str, str]) ->
             state["last_good_model"] = identifier
             state["last_good_model_spec"] = identifier
         _save_state(state)
+        _sync_env_active_model(identifier)
         return f"Use command completed. Using `{identifier}` for new replies."
 
     if subcommand == "load":
@@ -426,6 +449,7 @@ def handle_model_command(command: str, config: Config, state: dict[str, str]) ->
             state["active_model"] = previous_identifier
             state["active_model_spec"] = previous_spec
             _save_state(state)
+            _sync_env_active_model(previous_identifier)
             fallback_note = ""
             try:
                 if previous_identifier and not _is_model_loaded(config, previous_identifier):

@@ -31,6 +31,8 @@ Make sure LM Studio's local server is running and your model is loaded, then sta
 
 Use it in Discord with `!lm hello`, by mentioning the bot, or by sending it a DM.
 
+`LM_STUDIO_MODEL` is the runtime active model identifier. The bot updates it in `.env` when `!lm use` or a successful `!lm load` switches models, so restarts keep using the same active model.
+
 ## Model Commands
 
 The bot can manage LM Studio models through the local `lms` CLI.
