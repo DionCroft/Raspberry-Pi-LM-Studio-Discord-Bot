@@ -132,6 +132,10 @@ If Discord says LM Studio timed out, the most common cause on the Pi is too many
 
 Keep only one model loaded for the bot. The smaller `qwen3.5-0.8b` model should be the fast option; larger 4B+ models can work, but they may take several minutes or time out under load.
 
+## Discord Formatting
+
+Discord does not render LaTeX math. The bot prompt asks models to write equations in plain text, such as `epsilon_r`, `>=`, and `x 10^-12`, and the bot also cleans common LaTeX fragments before replying.
+
 ## Self-Healing
 
 - `!lm health` checks Discord readiness, LM Studio's API, the active model, loaded models, and available RAM.

@@ -28,8 +28,36 @@ LOCK_PATH = PROJECT_DIR / "bot.lock"
 DEFAULT_LOG_PATH = PROJECT_DIR / "bot.log"
 DEFAULT_SYSTEM_PROMPT = (
     "You are a concise, helpful assistant in Discord. "
-    "Answer naturally and keep replies practical."
+    "Answer naturally and keep replies practical. "
+    "Discord does not render LaTeX, so never use LaTeX or math delimiters like $...$. "
+    "Write equations in plain text, such as epsilon_r, epsilon_0, >=, <=, x 10^-12, and F/m."
 )
+LATEX_REPLACEMENTS = {
+    r"\alpha": "alpha",
+    r"\beta": "beta",
+    r"\gamma": "gamma",
+    r"\delta": "delta",
+    r"\epsilon": "epsilon",
+    r"\varepsilon": "epsilon",
+    r"\theta": "theta",
+    r"\lambda": "lambda",
+    r"\mu": "mu",
+    r"\pi": "pi",
+    r"\rho": "rho",
+    r"\sigma": "sigma",
+    r"\omega": "omega",
+    r"\Omega": "ohm",
+    r"\approx": "approx",
+    r"\times": "x",
+    r"\cdot": "*",
+    r"\leq": "<=",
+    r"\le": "<=",
+    r"\geq": ">=",
+    r"\ge": ">=",
+    r"\ll": "<<",
+    r"\gg": ">>",
+    r"\infty": "infinity",
+}
 
 
 def _load_dotenv(path: Path) -> None:
@@ -205,6 +233,23 @@ def _format_error(title: str, error: Exception) -> str:
     if len(detail) > 1200:
         detail = f"{detail[:1200].rstrip()}..."
     return f"{title}\n```text\n{detail}\n```"
+
+
+def _discord_safe_response(text: str) -> str:
+    text = re.sub(r"\\(?:text|mathrm)\{([^{}]*)\}", r"\1", text)
+    text = re.sub(r"\\frac\{([^{}]+)\}\{([^{}]+)\}", r"(\1)/(\2)", text)
+
+    for latex, replacement in LATEX_REPLACEMENTS.items():
+        text = text.replace(latex, replacement)
+
+    text = text.replace(r"\(", "").replace(r"\)", "")
+    text = text.replace(r"\[", "").replace(r"\]", "")
+    text = re.sub(r"\$\s*([^$\n]{1,200}?)\s*\$", r"\1", text)
+    text = re.sub(r"\^\{([^{}]+)\}", r"^(\1)", text)
+    text = re.sub(r"_\{([^{}]+)\}", r"_\1", text)
+    text = re.sub(r"\\([{}_])", r"\1", text)
+    text = re.sub(r"\\([A-Za-z]+)", r"\1", text)
+    return text
 
 
 def _format_lm_studio_error(config: Config, error: requests.RequestException) -> str:
@@ -423,13 +468,14 @@ def ask_lm_studio(prompt: str, config: Config, model: str) -> str:
     )
     response.raise_for_status()
     data = response.json()
-    return (
+    content = (
         data.get("choices", [{}])[0]
         .get("message", {})
         .get("content", "")
         .strip()
         or "LM Studio returned an empty response."
     )
+    return _discord_safe_response(content)
 
 
 def ask_lm_studio_with_reload(prompt: str, config: Config, state: dict[str, str]) -> str:
