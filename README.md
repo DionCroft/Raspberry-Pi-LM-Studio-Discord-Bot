@@ -23,10 +23,47 @@ LM_STUDIO_MODEL=qwen3-1.7b
 
 In the Discord Developer Portal, enable the bot's **Message Content Intent**.
 
-Make sure LM Studio's local server is running and your model is loaded, then start the bot:
+Make sure LM Studio's local server is running and your model is loaded, then start the bot manually:
 
 ```bash
 ./run.sh
+```
+
+If the bot is installed as a user service, do not also run `./run.sh` in another terminal. The service is the normal way to keep the bot online.
+
+## Service Commands
+
+Check whether the bot is running:
+
+```bash
+systemctl --user status lm-studio-discord-bot.service
+```
+
+Restart the bot after editing `.env` or `bot.py`:
+
+```bash
+systemctl --user restart lm-studio-discord-bot.service
+```
+
+Stop and start it manually:
+
+```bash
+systemctl --user stop lm-studio-discord-bot.service
+systemctl --user start lm-studio-discord-bot.service
+```
+
+Follow the bot log:
+
+```bash
+tail -f bot.log
+```
+
+For foreground testing in a terminal, stop the service first, run the script, then press `Ctrl+C` when finished and start the service again:
+
+```bash
+systemctl --user stop lm-studio-discord-bot.service
+./run.sh
+systemctl --user start lm-studio-discord-bot.service
 ```
 
 Use it in Discord with `!lm hello`, by mentioning the bot, or by sending it a DM.
