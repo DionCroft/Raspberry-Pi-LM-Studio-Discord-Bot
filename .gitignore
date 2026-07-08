@@ -6,3 +6,6 @@ bot.log
 bot.lock
 logs/
 state.json
+data/wikipedia/
+vendor/debs/
+vendor/kiwix-tools/

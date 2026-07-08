@@ -1,7 +1,8 @@
 [Unit]
 Description=Ensure LM Studio qwen3.5-0.8b Model
 Wants=network-online.target
-After=network-online.target
+Requires=lm-studio-app.service
+After=network-online.target lm-studio-app.service
 
 [Service]
 Type=oneshot

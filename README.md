@@ -34,18 +34,22 @@ If the bot is installed as a user service, do not also run `./run.sh` in another
 
 ## Boot Setup
 
-The Pi uses two user services:
+The Pi uses four user services:
 
 ```bash
+systemctl --user enable kiwix-wikipedia.service
+systemctl --user enable lm-studio-app.service
 systemctl --user enable lm-studio-qwen35-08b.service
 systemctl --user enable lm-studio-discord-bot.service
 ```
 
-`lm-studio-qwen35-08b.service` starts LM Studio's local server, unloads every model except `qwen3.5-0.8b`, and loads `qwen3.5-0.8b` if needed. The Discord bot service depends on it, so the model is ready before the bot starts after a reboot.
+`kiwix-wikipedia.service` serves the local Wikipedia ZIM on `127.0.0.1:8090`. `lm-studio-app.service` keeps the LM Studio AppImage running. `lm-studio-qwen35-08b.service` starts LM Studio's local server, unloads every model except `qwen3.5-0.8b`, and loads `qwen3.5-0.8b` if needed. The Discord bot service depends on LM Studio and starts after Kiwix when it is present.
 
-If you change the model in `.env`, restart both services:
+If you change the model in `.env`, restart the services:
 
 ```bash
+systemctl --user restart kiwix-wikipedia.service
+systemctl --user restart lm-studio-app.service
 systemctl --user restart lm-studio-qwen35-08b.service
 systemctl --user restart lm-studio-discord-bot.service
 ```
@@ -58,6 +62,12 @@ Check whether the bot is running:
 
 ```bash
 systemctl --user status lm-studio-discord-bot.service
+```
+
+Check whether local Wikipedia is running:
+
+```bash
+systemctl --user status kiwix-wikipedia.service
 ```
 
 Check whether LM Studio/model boot prep completed:
@@ -113,11 +123,14 @@ The bot can manage LM Studio models through the local `lms` CLI.
 !lm status
 !lm models
 !lm loaded
+!lm web latest Raspberry Pi news
+!lm wikifind Albert Einstein
+!lm wiki who was Albert Einstein?
 !lm use qwen3.5-0.8b
 !lm load qwen3.5-0.8b
 ```
 
-`!lm models` lists downloaded LM Studio models. `!lm loaded` shows currently loaded model instances. `!lm clean` unloads everything except the active bot model, loading the active model first if needed. `!lm load ...` unloads every other loaded model, loads the new model with one parallel slot and the context length from `LMS_DEFAULT_CONTEXT_LENGTH`, then makes the bot use that identifier for future replies.
+`!lm models` lists downloaded LM Studio models. `!lm loaded` shows currently loaded model instances. `!lm web <query>` searches the web, asks the active local model to answer from the search snippets, and includes source links. `!lm wikifind <query>` returns fast local Wikipedia excerpts without using LM Studio. `!lm wiki <query>` searches local Wikipedia, asks the active local model to answer from the excerpts, and includes local source links. `!lm clean` unloads everything except the active bot model, loading the active model first if needed. `!lm load ...` unloads every other loaded model, loads the new model with one parallel slot and the context length from `LMS_DEFAULT_CONTEXT_LENGTH`, then makes the bot use that identifier for future replies.
 
 Model identifiers are matched exactly against LM Studio's loaded identifiers, including names such as `qwen3.5-0.8b` or `qwen3.5-0.8b@q4_k_m`. `!lm use ...` only succeeds for a currently loaded identifier.
 
@@ -146,3 +159,44 @@ Discord does not render LaTeX math. The bot prompt asks models to write equation
 - Loading a new model switches back to the previous bot model if the new load fails.
 - Loading is refused when available RAM is below `LMS_MIN_FREE_MEMORY_MB`.
 - `bot.log` records command name, model, duration, and success/failure without logging Discord message text or tokens. It rotates according to `BOT_LOG_MAX_BYTES` and `BOT_LOG_BACKUP_COUNT`.
+
+## Web Search
+
+`!lm web <query>` and `!lm search <query>` use web search before calling LM Studio. By default the bot uses Bing RSS search results, which requires no API key and works from the headless Pi. DuckDuckGo HTML search is also supported, but it may return bot challenges from server environments. For a self-hosted or private search backend, set:
+
+```env
+WEB_SEARCH_PROVIDER=searxng
+SEARXNG_BASE_URL=https://your-searxng.example
+```
+
+Set `WEB_SEARCH_PROVIDER=duckduckgo` if you want to try DuckDuckGo instead.
+
+Search results are sent to the active local model as context, so `qwen3.5-0.8b` stays the fast default while still being able to answer from fresh web snippets.
+
+## Local Wikipedia
+
+Local Wikipedia uses Kiwix ZIM files served by `kiwix-serve` on `127.0.0.1:8090`. The current first-pass corpus is Simple English Wikipedia without pictures:
+
+```text
+data/wikipedia/wikipedia_en-simple_all_nopic_2026-06.zim
+```
+
+The Kiwix command-line tools are unpacked locally in `vendor/kiwix-tools`, so sudo is not required. To rebuild that local bundle:
+
+```bash
+./scripts/install_local_kiwix_tools.sh
+```
+
+To download or resume the default Simple English ZIM:
+
+```bash
+./scripts/download_wikipedia_zim.sh
+```
+
+To download a different ZIM, pass the file name and optional URL:
+
+```bash
+./scripts/download_wikipedia_zim.sh wikipedia_en_all_mini_2026-06.zim
+```
+
+`!lm wikifind <query>` is the fast local lookup command. `!lm wiki <query>` asks the local model to synthesize an answer from those excerpts, which is more useful but slower on the Pi.

@@ -1,7 +1,8 @@
 [Unit]
 Description=LM Studio Discord Bot
 Requires=lm-studio-qwen35-08b.service
-After=network-online.target lm-studio-qwen35-08b.service
+Wants=kiwix-wikipedia.service
+After=network-online.target lm-studio-qwen35-08b.service kiwix-wikipedia.service
 
 [Service]
 Type=simple

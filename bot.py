@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import html
+from html.parser import HTMLParser
 import json
 import logging
 import os
@@ -11,10 +13,12 @@ import re
 import subprocess
 import sys
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import discord
 import requests
@@ -79,6 +83,13 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass(frozen=True)
 class Config:
     discord_bot_token: str
@@ -98,6 +109,24 @@ class Config:
     bot_log_backup_count: int
     bot_max_queue_size: int
     bot_user_cooldown_seconds: int
+    web_search_enabled: bool
+    web_search_provider: str
+    web_search_max_results: int
+    web_search_timeout_seconds: int
+    web_search_user_agent: str
+    searxng_base_url: str | None
+    wiki_search_enabled: bool
+    wiki_base_url: str
+    wiki_max_results: int
+    wiki_timeout_seconds: int
+    wiki_article_chars: int
+
+
+@dataclass(frozen=True)
+class WebSearchResult:
+    title: str
+    url: str
+    snippet: str
 
 
 def load_config() -> Config:
@@ -124,6 +153,20 @@ def load_config() -> Config:
         bot_log_backup_count=_env_int("BOT_LOG_BACKUP_COUNT", 3),
         bot_max_queue_size=_env_int("BOT_MAX_QUEUE_SIZE", 3),
         bot_user_cooldown_seconds=_env_int("BOT_USER_COOLDOWN_SECONDS", 2),
+        web_search_enabled=_env_bool("WEB_SEARCH_ENABLED", True),
+        web_search_provider=(os.getenv("WEB_SEARCH_PROVIDER") or "bing").strip().lower(),
+        web_search_max_results=_env_int("WEB_SEARCH_MAX_RESULTS", 4),
+        web_search_timeout_seconds=_env_int("WEB_SEARCH_TIMEOUT_SECONDS", 12),
+        web_search_user_agent=(
+            os.getenv("WEB_SEARCH_USER_AGENT")
+            or "Mozilla/5.0 (compatible; lm-studio-discord-bot/1.0)"
+        ),
+        searxng_base_url=os.getenv("SEARXNG_BASE_URL") or None,
+        wiki_search_enabled=_env_bool("WIKI_SEARCH_ENABLED", True),
+        wiki_base_url=(os.getenv("WIKI_BASE_URL") or "http://127.0.0.1:8090").rstrip("/"),
+        wiki_max_results=_env_int("WIKI_MAX_RESULTS", 3),
+        wiki_timeout_seconds=_env_int("WIKI_TIMEOUT_SECONDS", 12),
+        wiki_article_chars=_env_int("WIKI_ARTICLE_CHARS", 700),
     )
 
 
@@ -452,7 +495,13 @@ def _looks_like_model_not_loaded(error: requests.HTTPError) -> bool:
     return False
 
 
-def ask_lm_studio(prompt: str, config: Config, model: str) -> str:
+def ask_lm_studio(
+    prompt: str,
+    config: Config,
+    model: str,
+    max_tokens: int = 700,
+    temperature: float = 0.7,
+) -> str:
     response = requests.post(
         f"{config.lm_studio_base_url.rstrip('/')}/chat/completions",
         json={
@@ -461,8 +510,8 @@ def ask_lm_studio(prompt: str, config: Config, model: str) -> str:
                 {"role": "system", "content": config.lm_studio_system_prompt},
                 {"role": "user", "content": f"/no_think {prompt}"},
             ],
-            "temperature": 0.7,
-            "max_tokens": 700,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
         },
         timeout=config.lm_studio_timeout_seconds,
     )
@@ -478,13 +527,19 @@ def ask_lm_studio(prompt: str, config: Config, model: str) -> str:
     return _discord_safe_response(content)
 
 
-def ask_lm_studio_with_reload(prompt: str, config: Config, state: dict[str, str]) -> str:
+def ask_lm_studio_with_reload(
+    prompt: str,
+    config: Config,
+    state: dict[str, str],
+    max_tokens: int = 700,
+    temperature: float = 0.7,
+) -> str:
     model = state["active_model"]
     try:
         unloaded = _ensure_single_active_model(config, state)
         if unloaded:
             logging.info("event=single_model_enforced active_model=%s unloaded=%s", model, ",".join(unloaded))
-        return ask_lm_studio(prompt, config, model)
+        return ask_lm_studio(prompt, config, model, max_tokens=max_tokens, temperature=temperature)
     except requests.HTTPError as exc:
         if not _looks_like_model_not_loaded(exc):
             raise
@@ -494,7 +549,456 @@ def ask_lm_studio_with_reload(prompt: str, config: Config, state: dict[str, str]
     _unload_other_models(config, model)
     _check_memory_guard(config)
     _load_model(config, model_spec, model)
-    return ask_lm_studio(prompt, config, model)
+    return ask_lm_studio(prompt, config, model, max_tokens=max_tokens, temperature=temperature)
+
+
+def _clean_search_text(value: str) -> str:
+    value = html.unescape(value)
+    value = re.sub(r"\s+", " ", value)
+    return value.strip()
+
+
+def _search_terms(query: str) -> list[str]:
+    stopwords = {
+        "about",
+        "after",
+        "before",
+        "best",
+        "find",
+        "latest",
+        "news",
+        "recent",
+        "search",
+        "today",
+        "update",
+        "updates",
+        "what",
+        "when",
+        "where",
+        "with",
+    }
+    terms = []
+    for term in re.findall(r"[A-Za-z0-9]+", query.lower()):
+        if term in stopwords:
+            continue
+        if len(term) >= 3 or term in {"ai", "pi", "vr"}:
+            terms.append(term)
+    return list(dict.fromkeys(terms))
+
+
+def _rank_search_results(query: str, results: list[WebSearchResult], max_results: int) -> list[WebSearchResult]:
+    terms = _search_terms(query)
+    if not terms:
+        return results[:max_results]
+
+    scored: list[tuple[int, WebSearchResult]] = []
+    for result in results:
+        tokens = set(re.findall(r"[a-z0-9]+", f"{result.title} {result.snippet} {result.url}".lower()))
+        score = sum(1 for term in terms if term in tokens)
+        scored.append((score, result))
+
+    threshold = min(2, len(terms))
+    relevant = [(score, result) for score, result in scored if score >= threshold]
+    if not relevant:
+        relevant = [(score, result) for score, result in scored if score > 0]
+    if not relevant:
+        return results[:max_results]
+
+    relevant.sort(key=lambda item: item[0], reverse=True)
+    return [result for _, result in relevant[:max_results]]
+
+
+def _normalize_duckduckgo_url(value: str) -> str:
+    if value.startswith("//"):
+        value = f"https:{value}"
+    parsed = urlparse(value)
+    query = parse_qs(parsed.query)
+    redirect = query.get("uddg", [""])[0]
+    if redirect:
+        return unquote(redirect)
+    return value
+
+
+class DuckDuckGoHTMLParser(HTMLParser):
+    def __init__(self, max_results: int) -> None:
+        super().__init__(convert_charrefs=True)
+        self.max_results = max_results
+        self.results: list[WebSearchResult] = []
+        self._current_url = ""
+        self._current_title: list[str] = []
+        self._current_snippet: list[str] = []
+        self._in_title = False
+        self._in_snippet = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attrs_dict = {key: value or "" for key, value in attrs}
+        classes = set(attrs_dict.get("class", "").split())
+        if tag == "a" and "result__a" in classes:
+            self._flush_current()
+            self._current_url = _normalize_duckduckgo_url(attrs_dict.get("href", ""))
+            self._current_title = []
+            self._current_snippet = []
+            self._in_title = True
+        elif "result__snippet" in classes:
+            self._in_snippet = True
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "a" and self._in_title:
+            self._in_title = False
+        elif tag in {"a", "div"} and self._in_snippet:
+            self._in_snippet = False
+
+    def handle_data(self, data: str) -> None:
+        if self._in_title:
+            self._current_title.append(data)
+        elif self._in_snippet:
+            self._current_snippet.append(data)
+
+    def close(self) -> None:
+        super().close()
+        self._flush_current()
+
+    def _flush_current(self) -> None:
+        if len(self.results) >= self.max_results or not self._current_url:
+            return
+        title = _clean_search_text(" ".join(self._current_title))
+        snippet = _clean_search_text(" ".join(self._current_snippet))
+        if title and self._current_url.startswith(("http://", "https://")):
+            self.results.append(WebSearchResult(title=title, url=self._current_url, snippet=snippet))
+        self._current_url = ""
+        self._current_title = []
+        self._current_snippet = []
+
+
+class KiwixSearchHTMLParser(HTMLParser):
+    def __init__(self, base_url: str, max_results: int) -> None:
+        super().__init__(convert_charrefs=True)
+        self.base_url = base_url
+        self.max_results = max_results
+        self.results: list[WebSearchResult] = []
+        self._in_results = False
+        self._results_depth = 0
+        self._in_link = False
+        self._in_cite = False
+        self._current_url = ""
+        self._current_title: list[str] = []
+        self._current_snippet: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attrs_dict = {key: value or "" for key, value in attrs}
+        classes = set(attrs_dict.get("class", "").split())
+        if self._in_results:
+            self._results_depth += 1
+        if tag == "div" and "results" in classes and not self._in_results:
+            self._in_results = True
+            self._results_depth = 1
+        elif self._in_results and tag == "li":
+            self._flush_current()
+            self._current_url = ""
+            self._current_title = []
+            self._current_snippet = []
+        elif self._in_results and tag == "a" and not self._current_url:
+            self._current_url = urljoin(f"{self.base_url}/", attrs_dict.get("href", ""))
+            self._in_link = True
+        elif self._in_results and tag == "cite":
+            self._in_cite = True
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "a" and self._in_link:
+            self._in_link = False
+        elif tag == "cite" and self._in_cite:
+            self._in_cite = False
+        elif tag == "li" and self._in_results:
+            self._flush_current()
+        if self._in_results:
+            self._results_depth -= 1
+        if self._in_results and self._results_depth <= 0:
+            self._in_results = False
+
+    def handle_data(self, data: str) -> None:
+        if self._in_link:
+            self._current_title.append(data)
+        elif self._in_cite:
+            self._current_snippet.append(data)
+
+    def close(self) -> None:
+        super().close()
+        self._flush_current()
+
+    def _flush_current(self) -> None:
+        if len(self.results) >= self.max_results or not self._current_url:
+            return
+        title = _clean_search_text(" ".join(self._current_title))
+        snippet = _clean_search_text(" ".join(self._current_snippet))
+        if title and self._current_url.startswith(("http://", "https://")):
+            self.results.append(WebSearchResult(title=title, url=self._current_url, snippet=snippet))
+        self._current_url = ""
+        self._current_title = []
+        self._current_snippet = []
+
+
+class KiwixArticleHTMLParser(HTMLParser):
+    def __init__(self, max_chars: int) -> None:
+        super().__init__(convert_charrefs=True)
+        self.max_chars = max_chars
+        self.paragraphs: list[str] = []
+        self._current: list[str] = []
+        self._in_paragraph = False
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in {"script", "style", "sup", "table"}:
+            self._skip_depth += 1
+        elif tag == "p" and self._skip_depth == 0:
+            self._current = []
+            self._in_paragraph = True
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"script", "style", "sup", "table"} and self._skip_depth > 0:
+            self._skip_depth -= 1
+        elif tag == "p" and self._in_paragraph:
+            paragraph = _clean_search_text(" ".join(self._current))
+            if len(paragraph) >= 80:
+                self.paragraphs.append(paragraph)
+            self._current = []
+            self._in_paragraph = False
+
+    def handle_data(self, data: str) -> None:
+        if self._in_paragraph and self._skip_depth == 0:
+            self._current.append(data)
+
+    def text(self) -> str:
+        text = "\n".join(self.paragraphs)
+        if len(text) <= self.max_chars:
+            return text
+        return f"{text[: self.max_chars].rsplit(' ', 1)[0].rstrip()}..."
+
+
+def _search_duckduckgo(query: str, config: Config) -> list[WebSearchResult]:
+    response = requests.get(
+        "https://html.duckduckgo.com/html/",
+        params={"q": query},
+        headers={"User-Agent": config.web_search_user_agent},
+        timeout=config.web_search_timeout_seconds,
+    )
+    response.raise_for_status()
+    parser = DuckDuckGoHTMLParser(config.web_search_max_results)
+    parser.feed(response.text)
+    parser.close()
+    return _rank_search_results(query, parser.results, config.web_search_max_results)
+
+
+def _search_bing(query: str, config: Config) -> list[WebSearchResult]:
+    response = requests.get(
+        "https://www.bing.com/search",
+        params={"format": "rss", "q": query},
+        headers={"User-Agent": config.web_search_user_agent},
+        timeout=config.web_search_timeout_seconds,
+    )
+    response.raise_for_status()
+    root = ET.fromstring(response.content)
+    results: list[WebSearchResult] = []
+    for item in root.findall(".//item"):
+        title = item.findtext("title", default="")
+        url = item.findtext("link", default="")
+        snippet = item.findtext("description", default="")
+        if url.startswith(("http://", "https://")):
+            results.append(
+                WebSearchResult(
+                    title=_clean_search_text(title),
+                    url=url.strip(),
+                    snippet=_clean_search_text(snippet),
+                )
+            )
+    return _rank_search_results(query, results, config.web_search_max_results)
+
+
+def _search_searxng(query: str, config: Config) -> list[WebSearchResult]:
+    if not config.searxng_base_url:
+        raise RuntimeError("SEARXNG_BASE_URL is required when WEB_SEARCH_PROVIDER=searxng.")
+    response = requests.get(
+        f"{config.searxng_base_url.rstrip('/')}/search",
+        params={"q": query, "format": "json"},
+        headers={"User-Agent": config.web_search_user_agent},
+        timeout=config.web_search_timeout_seconds,
+    )
+    response.raise_for_status()
+    data = response.json()
+    results: list[WebSearchResult] = []
+    for item in data.get("results", []):
+        title = item.get("title")
+        url = item.get("url")
+        snippet = item.get("content") or item.get("snippet") or ""
+        if isinstance(title, str) and isinstance(url, str) and url.startswith(("http://", "https://")):
+            results.append(
+                WebSearchResult(
+                    title=_clean_search_text(title),
+                    url=url.strip(),
+                    snippet=_clean_search_text(str(snippet)),
+                )
+            )
+    return _rank_search_results(query, results, config.web_search_max_results)
+
+
+def search_web(query: str, config: Config) -> list[WebSearchResult]:
+    if not config.web_search_enabled:
+        raise RuntimeError("Web search is disabled. Set WEB_SEARCH_ENABLED=true to enable it.")
+    query = query.strip()
+    if not query:
+        raise ValueError("Usage: `!lm web <search query>`")
+    if config.web_search_provider == "bing":
+        return _search_bing(query, config)
+    if config.web_search_provider == "searxng":
+        return _search_searxng(query, config)
+    if config.web_search_provider == "duckduckgo":
+        return _search_duckduckgo(query, config)
+    raise RuntimeError(f"Unsupported WEB_SEARCH_PROVIDER: {config.web_search_provider}")
+
+
+def answer_with_web_search(prompt: str, config: Config, state: dict[str, str]) -> str:
+    query = prompt.split(maxsplit=1)[1].strip() if " " in prompt else ""
+    results = search_web(query, config)
+    if not results:
+        return "Web search completed, but no usable results came back."
+
+    source_lines = []
+    for index, result in enumerate(results, start=1):
+        snippet = result.snippet or "No snippet available."
+        source_lines.append(f"[{index}] {result.title}\nURL: {result.url}\nSnippet: {snippet}")
+
+    grounded_prompt = (
+        "Use the web search results below to answer the user's question. "
+        "Keep the answer to 4 short bullets or fewer and cite sources inline like [1] or [2]. "
+        "If the results are insufficient, say what is missing.\n\n"
+        f"Question: {query}\n\n"
+        "Web search results:\n"
+        + "\n\n".join(source_lines)
+    )
+    answer = ask_lm_studio_with_reload(grounded_prompt, config, state, max_tokens=300, temperature=0.2)
+    sources = "\n".join(f"[{index}] {result.title} - {result.url}" for index, result in enumerate(results, start=1))
+    return f"{answer}\n\nSources:\n{sources}"
+
+
+def _fetch_wiki_article_text(url: str, config: Config) -> str:
+    response = requests.get(url, timeout=config.wiki_timeout_seconds)
+    response.raise_for_status()
+    response.encoding = "utf-8"
+    parser = KiwixArticleHTMLParser(config.wiki_article_chars)
+    parser.feed(response.text)
+    parser.close()
+    return parser.text()
+
+
+def _wiki_search_pattern(query: str) -> str:
+    stopwords = {
+        "a",
+        "an",
+        "are",
+        "can",
+        "did",
+        "do",
+        "does",
+        "explain",
+        "for",
+        "is",
+        "me",
+        "of",
+        "on",
+        "please",
+        "tell",
+        "the",
+        "to",
+        "was",
+        "were",
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "why",
+    }
+    terms = [term for term in re.findall(r"[A-Za-z0-9]+", query) if term.lower() not in stopwords]
+    return " ".join(terms) or query
+
+
+def _normalize_wiki_title(value: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", value.lower()))
+
+
+def search_wiki(query: str, config: Config) -> list[WebSearchResult]:
+    if not config.wiki_search_enabled:
+        raise RuntimeError("Local Wikipedia search is disabled. Set WIKI_SEARCH_ENABLED=true to enable it.")
+    query = query.strip()
+    if not query:
+        raise ValueError("Usage: `!lm wiki <search query>`")
+
+    search_pattern = _wiki_search_pattern(query)
+    response = requests.get(
+        f"{config.wiki_base_url}/search",
+        params={"pattern": search_pattern},
+        timeout=config.wiki_timeout_seconds,
+    )
+    response.raise_for_status()
+    response.encoding = "utf-8"
+
+    parser = KiwixSearchHTMLParser(config.wiki_base_url, config.wiki_max_results)
+    parser.feed(response.text)
+    parser.close()
+
+    parser_results = parser.results
+    normalized_pattern = _normalize_wiki_title(search_pattern)
+    exact_matches = [result for result in parser_results if _normalize_wiki_title(result.title) == normalized_pattern]
+    if exact_matches:
+        parser_results = exact_matches[:1]
+
+    results: list[WebSearchResult] = []
+    for result in parser_results:
+        article_text = ""
+        try:
+            article_text = _fetch_wiki_article_text(result.url, config)
+        except requests.RequestException as exc:
+            logging.warning("event=wiki_article_fetch_failed url=%s error=%s", result.url, exc)
+        snippet = article_text or result.snippet or "No snippet available."
+        results.append(WebSearchResult(title=result.title, url=result.url, snippet=snippet))
+    return results
+
+
+def format_wiki_results(prompt: str, config: Config) -> str:
+    query = prompt.split(maxsplit=1)[1].strip() if " " in prompt else ""
+    results = search_wiki(query, config)
+    if not results:
+        return "Local Wikipedia search completed, but no usable results came back."
+
+    lines = ["Local Wikipedia results:"]
+    for index, result in enumerate(results, start=1):
+        snippet = result.snippet[:500].rsplit(" ", 1)[0].rstrip()
+        if len(result.snippet) > len(snippet):
+            snippet = f"{snippet}..."
+        lines.append(f"[W{index}] {result.title}\n{snippet}\n{result.url}")
+    return "\n\n".join(lines)
+
+
+def answer_with_wiki_search(prompt: str, config: Config, state: dict[str, str]) -> str:
+    query = prompt.split(maxsplit=1)[1].strip() if " " in prompt else ""
+    results = search_wiki(query, config)
+    if not results:
+        return "Local Wikipedia search completed, but no usable results came back."
+
+    source_lines = []
+    for index, result in enumerate(results, start=1):
+        source_lines.append(f"[W{index}] {result.title}\nLocal URL: {result.url}\nExcerpt: {result.snippet}")
+
+    grounded_prompt = (
+        "Use the local Wikipedia excerpts below to answer the user's question. "
+        "Keep the answer to 4 short bullets or fewer and cite sources inline like [W1] or [W2]. "
+        "If the excerpts are insufficient, say what is missing.\n\n"
+        f"Question: {query}\n\n"
+        "Local Wikipedia excerpts:\n"
+        + "\n\n".join(source_lines)
+    )
+    answer = ask_lm_studio_with_reload(grounded_prompt, config, state, max_tokens=220, temperature=0.2)
+    sources = "\n".join(f"[W{index}] {result.title} - {result.url}" for index, result in enumerate(results, start=1))
+    return f"{answer}\n\nLocal Wikipedia sources:\n{sources}"
 
 
 def build_health_report(config: Config, state: dict[str, str], discord_ready: bool) -> str:
@@ -514,6 +1018,17 @@ def build_health_report(config: Config, state: dict[str, str], discord_ready: bo
     except requests.RequestException as exc:
         lines.append(f"- LM Studio API: failed ({exc})")
         broken.append("LM Studio API is not reachable")
+
+    if config.wiki_search_enabled:
+        try:
+            response = requests.get(f"{config.wiki_base_url}/catalog/v2/entries", timeout=5)
+            response.raise_for_status()
+            lines.append("- Local Wikipedia: ok")
+        except requests.RequestException as exc:
+            lines.append(f"- Local Wikipedia: failed ({exc})")
+            broken.append("Local Wikipedia/Kiwix is not reachable")
+    else:
+        lines.append("- Local Wikipedia: disabled")
 
     active_model = state["active_model"]
     active_spec = state.get("active_model_spec") or active_model
@@ -713,7 +1228,24 @@ def _command_name(prompt: str) -> str:
     if not lower:
         return "empty"
     first = lower.split()[0]
-    if first in {"health", "status", "current", "models", "list", "loaded", "ps", "use", "load", "clean"}:
+    if first in {
+        "health",
+        "status",
+        "current",
+        "models",
+        "list",
+        "loaded",
+        "ps",
+        "use",
+        "load",
+        "clean",
+        "web",
+        "search",
+        "wiki",
+        "wikipedia",
+        "wikifind",
+        "wikisearch",
+    }:
         return first
     return "chat"
 
@@ -784,6 +1316,9 @@ class LMStudioDiscordClient(discord.Client):
                                 f"`{self.config.discord_lm_prefix} status`, "
                                 f"`{self.config.discord_lm_prefix} models`, "
                                 f"`{self.config.discord_lm_prefix} loaded`, "
+                                f"`{self.config.discord_lm_prefix} web <query>`, "
+                                f"`{self.config.discord_lm_prefix} wiki <query>`, "
+                                f"`{self.config.discord_lm_prefix} wikifind <query>`, "
                                 f"`{self.config.discord_lm_prefix} use <identifier>`, "
                                 f"`{self.config.discord_lm_prefix} load <model> [as <identifier>]`."
                             )
@@ -797,6 +1332,12 @@ class LMStudioDiscordClient(discord.Client):
                         elif command in {"models", "list", "loaded", "ps", "status", "current", "use", "load", "clean"}:
                             model_command = prompt[6:].strip() if prompt.lower().startswith("model ") else prompt
                             reply = await asyncio.to_thread(handle_model_command, model_command, self.config, self.state)
+                        elif command in {"web", "search"}:
+                            reply = await asyncio.to_thread(answer_with_web_search, prompt, self.config, self.state)
+                        elif command in {"wiki", "wikipedia"}:
+                            reply = await asyncio.to_thread(answer_with_wiki_search, prompt, self.config, self.state)
+                        elif command in {"wikifind", "wikisearch"}:
+                            reply = await asyncio.to_thread(format_wiki_results, prompt, self.config)
                         else:
                             reply = await asyncio.to_thread(
                                 ask_lm_studio_with_reload,
