@@ -143,7 +143,7 @@ def load_config() -> Config:
         lms_default_context_length=_env_int("LMS_DEFAULT_CONTEXT_LENGTH", 16384),
         lms_default_ttl_seconds=_env_int("LMS_DEFAULT_TTL_SECONDS", 14400),
         lms_min_free_memory_mb=_env_int("LMS_MIN_FREE_MEMORY_MB", 700),
-        lms_ps_timeout_seconds=_env_int("LMS_PS_TIMEOUT_SECONDS", 10),
+        lms_ps_timeout_seconds=_env_int("LMS_PS_TIMEOUT_SECONDS", 30),
         lm_studio_base_url=os.getenv("LM_STUDIO_BASE_URL") or "http://127.0.0.1:1234/v1",
         lm_studio_model=os.getenv("LM_STUDIO_MODEL") or "qwen3.5-0.8b",
         lm_studio_timeout_seconds=_env_int("LM_STUDIO_TIMEOUT_SECONDS", 180),
@@ -318,8 +318,8 @@ def _api_model_identifiers(config: Config, timeout: int = 12) -> list[str]:
     return identifiers
 
 
-def _loaded_model_identifiers_from_lms_ls(config: Config) -> list[str]:
-    output = _run_lms(config, ["ls"], timeout=45)
+def _loaded_model_identifiers_from_lms_ls(config: Config, timeout: int = 45) -> list[str]:
+    output = _run_lms(config, ["ls"], timeout=timeout)
     identifiers: list[str] = []
     for raw_line in output.splitlines():
         line = raw_line.strip()
@@ -335,13 +335,7 @@ def _loaded_model_identifiers_from_lms_ls(config: Config) -> list[str]:
 
 
 def _loaded_model_identifiers(config: Config) -> list[str]:
-    lms_ls_error: Exception | None = None
-    try:
-        return _loaded_model_identifiers_from_lms_ls(config)
-    except Exception as exc:
-        lms_ls_error = exc
-        logging.warning("lms ls loaded-marker check failed; falling back to lms ps: %s", exc)
-
+    lms_ps_error: Exception | None = None
     try:
         output = _run_lms(config, ["ps"], timeout=config.lms_ps_timeout_seconds)
         identifiers: list[str] = []
@@ -353,15 +347,37 @@ def _loaded_model_identifiers(config: Config) -> list[str]:
             if first and first not in {"MODEL", "STATUS"}:
                 identifiers.append(first)
         return identifiers
-    except Exception as ps_exc:
+    except Exception as exc:
+        lms_ps_error = exc
+        logging.warning("lms ps check failed; falling back to lms ls loaded-marker check: %s", exc)
+
+    try:
+        return _loaded_model_identifiers_from_lms_ls(config, timeout=5)
+    except Exception as ls_exc:
         raise RuntimeError(
             "Could not inspect loaded models through `lms ps` or `lms ls`. "
-            f"lms ls error: {lms_ls_error}; lms ps error: {ps_exc}"
-        ) from ps_exc
+            f"lms ps error: {lms_ps_error}; lms ls error: {ls_exc}"
+        ) from ls_exc
 
 
 def _format_loaded_models(config: Config) -> str:
-    loaded = _loaded_model_identifiers(config)
+    try:
+        loaded = _loaded_model_identifiers(config)
+    except Exception as exc:
+        try:
+            api_identifiers = _api_model_identifiers(config)
+            api_note = (
+                "LM Studio API is reachable and lists these available model identifiers:\n"
+                + "\n".join(f"- `{identifier}`" for identifier in api_identifiers)
+            )
+        except requests.RequestException as api_exc:
+            api_note = f"LM Studio API fallback also failed: {api_exc}"
+        return (
+            "Loaded-models command could not inspect loaded instances through the `lms` CLI.\n"
+            + api_note
+            + "\n\n"
+            + _format_error("lms inspection failed.", exc)
+        )
     if not loaded:
         return "Loaded-models command completed. No models are currently loaded."
     return "Loaded-models command completed.\n" + "\n".join(f"- `{identifier}`" for identifier in loaded)
@@ -405,6 +421,24 @@ def _ensure_single_active_model(config: Config, state: dict[str, str]) -> list[s
         _check_memory_guard(config)
         _load_model(config, active_spec, active_model)
     return unloaded
+
+
+def _ensure_active_model_available(config: Config, state: dict[str, str]) -> list[str]:
+    active_model = state["active_model"]
+    try:
+        if active_model in _api_model_identifiers(config):
+            return []
+    except requests.RequestException as exc:
+        logging.warning("LM Studio API model check failed; falling back to lms CLI: %s", exc)
+    return _ensure_single_active_model(config, state)
+
+
+def _active_model_api_available(config: Config, active_model: str) -> tuple[bool, str | None]:
+    try:
+        identifiers = _api_model_identifiers(config)
+    except requests.RequestException as exc:
+        return False, str(exc)
+    return active_model in identifiers, None
 
 
 def _runtime_warnings(config: Config, state: dict[str, str]) -> list[str]:
@@ -536,7 +570,7 @@ def ask_lm_studio_with_reload(
 ) -> str:
     model = state["active_model"]
     try:
-        unloaded = _ensure_single_active_model(config, state)
+        unloaded = _ensure_active_model_available(config, state)
         if unloaded:
             logging.info("event=single_model_enforced active_model=%s unloaded=%s", model, ",".join(unloaded))
         return ask_lm_studio(prompt, config, model, max_tokens=max_tokens, temperature=temperature)
@@ -971,11 +1005,16 @@ def format_wiki_results(prompt: str, config: Config) -> str:
 
     lines = ["Local Wikipedia results:"]
     for index, result in enumerate(results, start=1):
-        snippet = result.snippet[:500].rsplit(" ", 1)[0].rstrip()
-        if len(result.snippet) > len(snippet):
-            snippet = f"{snippet}..."
-        lines.append(f"[W{index}] {result.title}\n{snippet}\n{result.url}")
+        lines.append(f"[W{index}] {result.title}\n{_short_excerpt(result.snippet, 650)}")
     return "\n\n".join(lines)
+
+
+def _short_excerpt(text: str, max_chars: int) -> str:
+    text = _clean_search_text(text)
+    if len(text) <= max_chars:
+        return text
+    trimmed = text[:max_chars].rsplit(" ", 1)[0].rstrip()
+    return f"{trimmed}..."
 
 
 def answer_with_wiki_search(prompt: str, config: Config, state: dict[str, str]) -> str:
@@ -986,7 +1025,7 @@ def answer_with_wiki_search(prompt: str, config: Config, state: dict[str, str]) 
 
     source_lines = []
     for index, result in enumerate(results, start=1):
-        source_lines.append(f"[W{index}] {result.title}\nLocal URL: {result.url}\nExcerpt: {result.snippet}")
+        source_lines.append(f"[W{index}] {result.title}\nExcerpt: {_short_excerpt(result.snippet, 700)}")
 
     grounded_prompt = (
         "Use the local Wikipedia excerpts below to answer the user's question. "
@@ -997,8 +1036,11 @@ def answer_with_wiki_search(prompt: str, config: Config, state: dict[str, str]) 
         + "\n\n".join(source_lines)
     )
     answer = ask_lm_studio_with_reload(grounded_prompt, config, state, max_tokens=220, temperature=0.2)
-    sources = "\n".join(f"[W{index}] {result.title} - {result.url}" for index, result in enumerate(results, start=1))
-    return f"{answer}\n\nLocal Wikipedia sources:\n{sources}"
+    sources = "\n\n".join(
+        f"[W{index}] {result.title}\n{_short_excerpt(result.snippet, 280)}"
+        for index, result in enumerate(results, start=1)
+    )
+    return f"{answer}\n\nLocal Wikipedia excerpts:\n{sources}"
 
 
 def build_health_report(config: Config, state: dict[str, str], discord_ready: bool) -> str:
@@ -1034,25 +1076,16 @@ def build_health_report(config: Config, state: dict[str, str], discord_ready: bo
     active_spec = state.get("active_model_spec") or active_model
     lines.append(f"- Active model: `{active_model}` (spec: `{active_spec}`)")
 
-    try:
-        loaded = _loaded_model_identifiers(config)
-        if loaded:
-            lines.append("- Loaded models: " + ", ".join(f"`{identifier}`" for identifier in loaded))
-        else:
-            lines.append("- Loaded models: none")
-        if len(loaded) > 1:
-            lines.append("- Single-model mode: violated")
-            broken.append("More than one LM Studio model is loaded, which can overload the Pi")
-        else:
-            lines.append("- Single-model mode: ok")
-        if active_model in loaded:
-            lines.append("- Active model loaded: yes")
-        else:
-            lines.append("- Active model loaded: no")
-            broken.append(f"Active model `{active_model}` is not loaded")
-    except Exception as exc:
-        lines.append(f"- Loaded models: failed ({exc})")
-        broken.append("Could not inspect loaded models")
+    api_available, api_error = _active_model_api_available(config, active_model)
+    if api_error:
+        lines.append(f"- Active model API availability: failed ({api_error})")
+        broken.append("Could not confirm the active model through the LM Studio API")
+    elif api_available:
+        lines.append("- Active model API availability: yes")
+    else:
+        lines.append("- Active model API availability: no")
+        broken.append(f"Active model `{active_model}` is not available through the LM Studio API")
+    lines.append("- Loaded-model CLI inspection: use `!lm loaded` or `!lm clean`")
 
     available_mb = _memory_available_mb()
     if available_mb is None:
