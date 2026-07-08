@@ -1,0 +1,9 @@
+[Unit]
+Description=Back Up Pi Bot Runtime State
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/cadmus/Projects/lm-studio-discord-bot
+ExecStart=/home/cadmus/Projects/lm-studio-discord-bot/scripts/backup_runtime_state.sh
+TimeoutStartSec=5min
+

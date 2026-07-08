@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Pi Bot Stack Health Check
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+RandomizedDelaySec=2min
+Persistent=true
+Unit=pi-service-healthcheck.service
+
+[Install]
+WantedBy=timers.target

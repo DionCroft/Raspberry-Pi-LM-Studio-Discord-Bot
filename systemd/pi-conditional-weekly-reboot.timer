@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Conditional Weekly Pi Reboot Check
+
+[Timer]
+OnCalendar=Sun *-*-* 05:30:00
+RandomizedDelaySec=20min
+Persistent=true
+Unit=pi-conditional-weekly-reboot.service
+
+[Install]
+WantedBy=timers.target

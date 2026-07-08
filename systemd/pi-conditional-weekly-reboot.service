@@ -1,0 +1,9 @@
+[Unit]
+Description=Conditional Weekly Pi Reboot
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/cadmus/Projects/lm-studio-discord-bot
+ExecStart=/home/cadmus/Projects/lm-studio-discord-bot/scripts/conditional_weekly_reboot.sh
+TimeoutStartSec=2min
+

@@ -41,9 +41,18 @@ systemctl --user enable kiwix-wikipedia.service
 systemctl --user enable lm-studio-app.service
 systemctl --user enable lm-studio-qwen35-08b.service
 systemctl --user enable lm-studio-discord-bot.service
+systemctl --user enable pi-service-maintenance.timer
+systemctl --user enable pi-service-healthcheck.timer
+systemctl --user enable pi-runtime-backup.timer
 ```
 
 `kiwix-wikipedia.service` serves the local Wikipedia ZIM on `127.0.0.1:8090`. `lm-studio-app.service` keeps the LM Studio AppImage running. `lm-studio-qwen35-08b.service` starts LM Studio's local server, unloads every model except `qwen3.5-0.8b`, and loads `qwen3.5-0.8b` if needed. The Discord bot service depends on LM Studio and starts after Kiwix when it is present.
+
+`pi-service-maintenance.timer` runs once a day around 04:30, with up to 10 minutes of random delay. It stops the Discord bot, restarts the research funding signup service if it is installed, restarts Kiwix, restarts LM Studio, re-runs the model loader, and starts the bot again. This is a lighter 24/7 maintenance cycle than rebooting the whole Pi.
+
+`pi-service-healthcheck.timer` runs every 15 minutes. It checks the Discord bot service, LM Studio API, Kiwix API, available RAM, and swap pressure. After repeated LM Studio or Kiwix failures it restarts the affected stack.
+
+`pi-runtime-backup.timer` writes private runtime backups under `backups/`, including `.env`, `state.json`, scripts, and systemd templates. The backup directory is gitignored and mode `700`.
 
 If you change the model in `.env`, restart the services:
 
@@ -55,6 +64,24 @@ systemctl --user restart lm-studio-discord-bot.service
 ```
 
 Service templates live in `systemd/`; install them to `~/.config/systemd/user/`.
+
+```bash
+cp systemd/*.service systemd/*.timer ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now pi-service-maintenance.timer pi-service-healthcheck.timer pi-runtime-backup.timer
+```
+
+For persistent service history, Raspberry Pi OS currently forces volatile journald storage. Run this once with sudo if you want `journalctl --user` logs to survive reboots:
+
+```bash
+sudo ./scripts/configure_pi_24x7_system.sh
+```
+
+The Pi already has zram swap active. If weekly reboot checks are desired, set `WEEKLY_REBOOT_ENABLED=true` in `.env`, install `pi-conditional-weekly-reboot.timer`, and enable it:
+
+```bash
+systemctl --user enable --now pi-conditional-weekly-reboot.timer
+```
 
 ## Service Commands
 
@@ -99,6 +126,18 @@ Follow the LM Studio model loader log:
 
 ```bash
 tail -f logs/lm-studio-model.log
+```
+
+Follow the daily maintenance log:
+
+```bash
+tail -f logs/daily-service-maintenance.log
+```
+
+Follow the health-check log:
+
+```bash
+tail -f logs/service-health.log
 ```
 
 For foreground testing in a terminal, stop the service first, run the script, then press `Ctrl+C` when finished and start the service again:

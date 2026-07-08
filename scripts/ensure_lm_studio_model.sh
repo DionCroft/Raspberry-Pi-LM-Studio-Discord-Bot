@@ -33,6 +33,7 @@ MODEL="$(read_env_value LM_STUDIO_MODEL qwen3.5-0.8b)"
 MODEL_SPEC="$(read_env_value LM_STUDIO_MODEL_SPEC "$MODEL")"
 CONTEXT_LENGTH="$(read_env_value LMS_DEFAULT_CONTEXT_LENGTH 16384)"
 TTL_SECONDS="$(read_env_value LMS_DEFAULT_TTL_SECONDS 0)"
+LM_STUDIO_BASE_URL="$(read_env_value LM_STUDIO_BASE_URL http://127.0.0.1:1234/v1)"
 
 mkdir -p "$LOG_DIR"
 exec >>"$LOG_FILE" 2>&1
@@ -49,6 +50,16 @@ for _attempt in {1..12}; do
 done
 
 "$LMS" ls >/dev/null
+
+api_models_url="${LM_STUDIO_BASE_URL%/}/models"
+for _attempt in {1..24}; do
+  if curl --fail --silent --show-error --max-time 5 "$api_models_url" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 5
+done
+
+curl --fail --silent --show-error --max-time 10 "$api_models_url" >/dev/null
 
 loaded_models() {
   "$LMS" ls | awk '
@@ -94,4 +105,13 @@ else
 fi
 
 "$LMS" "${load_args[@]}"
+
+for _attempt in {1..24}; do
+  if curl --fail --silent --show-error --max-time 5 "$api_models_url" | grep -q "\"$MODEL\""; then
+    break
+  fi
+  sleep 5
+done
+
+curl --fail --silent --show-error --max-time 10 "$api_models_url" | grep -q "\"$MODEL\""
 echo "[$(date -Is)] LM Studio model ready: $MODEL"

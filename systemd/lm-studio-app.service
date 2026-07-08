@@ -2,12 +2,15 @@
 Description=LM Studio App
 Wants=graphical-session.target
 After=graphical-session.target
+StartLimitIntervalSec=5min
+StartLimitBurst=6
 
 [Service]
 Type=simple
 ExecStart=/usr/bin/env -u ELECTRON_RUN_AS_NODE /home/cadmus/Applications/LM-Studio.AppImage --disable-gpu --disable-software-rasterizer
 Restart=on-failure
 RestartSec=10
+TimeoutStopSec=45
 Environment=DISPLAY=:0
 Environment=WAYLAND_DISPLAY=wayland-0
 Environment=XDG_RUNTIME_DIR=/run/user/1000

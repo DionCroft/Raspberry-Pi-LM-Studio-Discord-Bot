@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Pi Bot Service Maintenance
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/cadmus/Projects/lm-studio-discord-bot
+ExecStart=/home/cadmus/Projects/lm-studio-discord-bot/scripts/daily_service_maintenance.sh
+TimeoutStartSec=20min
+

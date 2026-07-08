@@ -3,6 +3,8 @@ Description=Ensure LM Studio qwen3.5-0.8b Model
 Wants=network-online.target
 Requires=lm-studio-app.service
 After=network-online.target lm-studio-app.service
+StartLimitIntervalSec=10min
+StartLimitBurst=4
 
 [Service]
 Type=oneshot

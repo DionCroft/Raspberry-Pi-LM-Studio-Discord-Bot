@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Daily Pi Bot Service Maintenance
+
+[Timer]
+OnCalendar=*-*-* 04:30:00
+RandomizedDelaySec=10min
+Persistent=true
+Unit=pi-service-maintenance.service
+
+[Install]
+WantedBy=timers.target

@@ -5,6 +5,7 @@ __pycache__/
 bot.log
 bot.lock
 logs/
+backups/
 state.json
 data/wikipedia/
 vendor/debs/

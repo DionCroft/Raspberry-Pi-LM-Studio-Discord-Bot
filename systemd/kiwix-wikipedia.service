@@ -1,6 +1,8 @@
 [Unit]
 Description=Local Kiwix Wikipedia Server
 After=network-online.target
+StartLimitIntervalSec=5min
+StartLimitBurst=10
 
 [Service]
 Type=simple
@@ -9,6 +11,7 @@ Environment=LD_LIBRARY_PATH=/home/cadmus/Projects/lm-studio-discord-bot/vendor/k
 ExecStart=/home/cadmus/Projects/lm-studio-discord-bot/vendor/kiwix-tools/usr/bin/kiwix-serve -i 127.0.0.1 -p 8090 /home/cadmus/Projects/lm-studio-discord-bot/data/wikipedia/wikipedia_en-simple_all_nopic_2026-06.zim
 Restart=always
 RestartSec=5
+TimeoutStopSec=20
 
 [Install]
 WantedBy=default.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=Pi Bot Stack Health Check
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/cadmus/Projects/lm-studio-discord-bot
+ExecStart=/home/cadmus/Projects/lm-studio-discord-bot/scripts/service_health_check.sh
+TimeoutStartSec=10min
+
